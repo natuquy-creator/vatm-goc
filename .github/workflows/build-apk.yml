@@ -1,0 +1,177 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Lấy mã nguồn
+        uses: actions/checkout@v4
+
+      # Tự tìm thư mục chứa capacitor.config.json
+      - name: Xác định thư mục dự án
+        run: |
+          CFG=$(find . -maxdepth 4 -name capacitor.config.json -not -path '*/node_modules/*' | head -n 1)
+          if [ -z "$CFG" ]; then
+            echo "::error::Không tìm thấy capacitor.config.json. Hãy tải lên GitHub TOÀN BỘ nội dung đã giải nén."
+            ls -R . | head -60
+            exit 1
+          fi
+          DIR=$(dirname "$CFG")
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          echo "Thư mục dự án: $DIR"
+
+      - name: Cài Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cài JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Kiểm tra / tạo thư mục web (www)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ ! -f www/index.html ]; then
+            if [ -f index.html ]; then
+              mkdir -p www
+              cp index.html www/
+              for f in manifest.json sw.js; do [ -f "$f" ] && cp "$f" www/ || true; done
+              # Copy icons nếu có thư mục icons
+              [ -d icons ] && cp -r icons www/ || true
+            else
+              echo "::error::Không tìm thấy www/index.html hoặc index.html"
+              exit 1
+            fi
+          fi
+          ls -la www
+
+      - name: Cài thư viện Capacitor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f package.json ]; then
+            npm install --no-audit --no-fund --legacy-peer-deps
+          else
+            npm init -y
+            npm install --no-audit --no-fund --legacy-peer-deps @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          fi
+
+      - name: Tạo dự án Android
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ ! -d android ]; then
+            npx cap add android
+          fi
+          ls android
+
+      - name: Cấp quyền camera (quét QR) và thông báo
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          if ! grep -q "android.permission.CAMERA" "$MANIFEST"; then
+            sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#&\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />#' "$MANIFEST"
+          fi
+          grep -n "uses-permission\|uses-feature" "$MANIFEST"
+
+      - name: Đặt biểu tượng và màn hình khởi động VATM
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          # Tìm logo VATM theo thứ tự ưu tiên
+          SRC=""
+          for candidate in \
+            "www/icons/icon-512.png" \
+            "icons/icon-512.png" \
+            "icon-512.png" \
+            "www/icon-512.png" \
+            "assets/icon-512.png" \
+            "assets/logo.png" \
+            "icon-maskable-512.png" \
+            "icon-only.png"; do
+            if [ -f "$candidate" ]; then
+              SRC="$candidate"
+              echo "Đã tìm thấy logo: $SRC"
+              break
+            fi
+          done
+
+          if [ -z "$SRC" ]; then
+            echo "::error::Không tìm thấy logo VATM (icon-512.png). Hãy đặt file icon-512.png ở root hoặc www/icons/"
+            find . -name "*.png" | head -20
+            exit 1
+          fi
+
+          # Đảm bảo có thư mục www/icons để các bước sau dùng
+          mkdir -p www/icons
+          cp "$SRC" www/icons/icon-512.png
+          SRC=www/icons/icon-512.png
+
+          RES=android/app/src/main/res
+          if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y imagemagick
+          fi
+          if command -v magick >/dev/null 2>&1; then IM="magick"; else IM="convert"; fi
+
+          # Icon launcher: thường, tròn và adaptive
+          make_icons() {
+            D="$RES/mipmap-$1"; L=$2; A=$3; F=$(( A * 62 / 100 )); C=$(( L / 2 ))
+            mkdir -p "$D"
+            $IM "$SRC" -resize ${L}x${L} "$D/ic_launcher.png"
+            $IM "$SRC" -resize ${L}x${L} \( -size ${L}x${L} xc:none -fill white -draw "circle $C,$C $C,0" \) -compose DstIn -composite "$D/ic_launcher_round.png"
+            $IM -size ${A}x${A} xc:none \( "$SRC" -resize ${F}x${F} \) -gravity center -composite "$D/ic_launcher_foreground.png"
+          }
+          make_icons mdpi 48 108
+          make_icons hdpi 72 162
+          make_icons xhdpi 96 216
+          make_icons xxhdpi 144 324
+          make_icons xxxhdpi 192 432
+
+          # Adaptive icon (Android 8+)
+          mkdir -p "$RES/mipmap-anydpi-v26" "$RES/values"
+          for N in ic_launcher ic_launcher_round; do
+          cat > "$RES/mipmap-anydpi-v26/$N.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/vatm_icon_background"/>
+              <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+          </adaptive-icon>
+          EOF
+          done
+          cat > "$RES/values/vatm_icon_colors.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="vatm_icon_background">#FFFFFF</color>
+          </resources>
+          EOF
+
+          # Splash screen: logo VATM giữa nền trắng
+          find "$RES" -name 'splash.png' | while read -r f; do
+            W=$($IM "$f" -format %w info:); H=$($IM "$f" -format %h info:)
+            S=$(( (W < H ? W : H) * 40 / 100 ))
+            $IM -size ${W}x${H} xc:white \( "$SRC" -resize ${S}x${S} \) -gravity center -composite "$f.tmp.png" && mv "$f.tmp.png" "$f"
+          done
+          echo "Đã đặt biểu tượng VATM thành công từ $SRC"
+
+      - name: Đồng bộ giao diện web vào Android
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx cap sync android
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Tải file APK lên Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: VATM-HoSo-APK
+          path: ${{ env.PROJECT_DIR }}/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
