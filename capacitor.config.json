@@ -1,0 +1,9 @@
+{
+  "appId": "vn.vatm.hosoxuatcanh",
+  "appName": "VATM Hồ sơ",
+  "webDir": "www",
+  "backgroundColor": "#ffffff",
+  "android": {
+    "allowMixedContent": false
+  }
+}
