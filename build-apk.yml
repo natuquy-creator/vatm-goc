@@ -1,0 +1,55 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy mã nguồn
+        uses: actions/checkout@v4
+
+      - name: Cài Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cài JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Cài thư viện
+        run: npm install
+
+      - name: Tạo dự án Android
+        run: npx cap add android
+
+      - name: Cấp quyền camera (quét QR) và thông báo
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#&\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />#' "$MANIFEST"
+          grep -n "uses-permission\|uses-feature" "$MANIFEST"
+
+      - name: Tạo biểu tượng ứng dụng VATM
+        run: npx capacitor-assets generate --android --assetPath assets
+
+      - name: Đồng bộ giao diện web vào Android
+        run: npx cap sync android
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Tải file APK lên Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: VATM-HoSo-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
